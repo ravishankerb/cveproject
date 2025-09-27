@@ -1,88 +1,69 @@
 import json
-import requests
-import os
+import asyncio
+import pandas as pd
 
 from typing import Dict, Any
-
 from scan_parsers import parse_snyk_report
 from llm_requests import analyze_with_llm
+from utils import load_kev_catalog
+from utils import enrich_findings
 
-def get_nvd_cvss(cve_id):
-    url = f"https://services.nvd.nist.gov/rest/json/cve/1.0/{cve_id}"
-    r = requests.get(url, timeout=10)
-    if r.status_code != 200:
-        return None
+async def process_findings():    
     
-    data = r.json()
-    try:
-        cvss = data["result"]["CVE_Items"][0]["impact"]["baseMetricV3"]["cvssV3"]
-        return {
-            "baseScore": cvss["baseScore"],
-            "vector": cvss["vectorString"],
-            "attackVector": cvss["attackVector"],
-            "privilegesRequired": cvss["privilegesRequired"]
-        }
-    except KeyError:
-        return None
-
-def load_kev_catalog(file_path="kev.json"):
-    print(f"In load_dev_catalog")
-    with open(file_path, "r") as f:
-        kev = json.load(f)
-    return {item["cveID"]: item for item in kev["vulnerabilities"]}
-
-def check_kev(cve_id, kev_db):
-    return kev_db.get(cve_id, None)
-
-
-def check_code_usage(pkg_name, repo_path="."):
-    hits = []
-    for root, _, files in os.walk(repo_path):
-        for f in files:
-            if f.endswith((".java", ".py", ".js")):  # extend as needed
-                with open(os.path.join(root, f), "r", errors="ignore") as src:
-                    if pkg_name in src.read():
-                        hits.append(os.path.join(root, f))
-    return hits
-
-def tag_context(cve_entry, repo_path="."):
-    usage = check_code_usage(cve_entry["pkg"], repo_path)
-    cve_entry["used_in_code"] = len(usage) > 0
-    # crude external-facing check
-    cve_entry["external_facing"] = os.path.exists(os.path.join(repo_path, "Dockerfile"))
-    return cve_entry
-
-
-def enrich_findings(scanner_report, kev_db, repo_path="."):
-    enriched = []
-    for finding in scanner_report:
-        cve = finding["cve"]
-        nvd_data = get_nvd_cvss(cve)
-        kev_hit = check_kev(cve, kev_db)
-        finding["cvss"] = nvd_data
-        finding["kev"] = True if kev_hit else False
-        finding = tag_context(finding, repo_path)
-        enriched.append(finding)
-    return enriched
-
+    print(f"Starting to process {len(findings)} findings...")
+    
+    # Create actual Task objects with their finding data
+    task_objects = []
+    for i, finding in enumerate(findings):
+        print(f"Creating task for finding {i}: {finding.get('cve', 'Unknown CVE')}")
+        task = asyncio.create_task(analyze_with_llm(finding, project_context))
+        task_objects.append((i, finding, task))
+    
+    print(f"Created {len(task_objects)} tasks, starting async processing...")
+    
+    # Use a different approach - process tasks as they complete
+    pending_tasks = {task: (i, finding) for i, finding, task in task_objects}
+    
+    while pending_tasks:
+        # Wait for any task to complete
+        done, pending = await asyncio.wait(
+            pending_tasks.keys(), 
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        
+        for task in done:
+            result = await task
+            i, finding = pending_tasks[task]
+            print(f"Task {i} completed for {finding.get('cve', 'Unknown CVE')}")
+            
+            yield {
+                'finding': finding,
+                'analysis': result
+            }
+            
+            # Remove completed task from pending
+            del pending_tasks[task]
 
 scan_details = parse_snyk_report("E:\\AgentAI\\enterprise-vuln-app\\snyk_report.json")
+print(f"Found {len(scan_details)} scan details")
 project_context = "This is a Java-based microservice exposed to the internet, handling sensitive customer data."
 kev_db = load_kev_catalog(".\\data\\kev.json")
-findings = enrich_findings(scan_details, kev_db)
+findings = enrich_findings(scan_details, kev_db, "E:\\AgentAI\\enterprise-vuln-app")
+print(f"Enriched {len(findings)} findings")
 
-import pandas as pd
-results = []
+# Run the async function and process yielded resultsfinding["kev"] 
+async def main():
+    async for item in process_findings():
+        print(item)
+        print(f"\n{'='*60}")
+        print(f"CVE: {item['finding']['cve']} | Package: {item['finding']['pkg']} | CVSS: {item['finding']['cvss']} | Kev: {item['finding']['kev']} | Used in Code: {item['finding']['used_in_code']}")
+        
+        # Display usage details if the package is found in code
+        if item['finding']['used_in_code'] and item['finding'].get('usage_details'):
+            print("Usage locations:")
+            for usage in item['finding']['usage_details']:
+                print(f"  - {usage['file']}:{usage['line_number']} - {usage['line_content']}")
+        
+        print(json.dumps(item['analysis'], indent=2))
 
-for f in findings:
-    result = analyze_with_llm(f, project_context)
-    results.append({
-        'CVE': f['cve'],
-        'Package': f['pkg'],
-        'Priority': result['priority'],
-        'Explanation': result['explanation'][:100] + '...' if len(result['explanation']) > 100 else result['explanation']
-    })
-df = pd.DataFrame(results)
-print(df.to_string(index=False))
-
-
+asyncio.run(main())

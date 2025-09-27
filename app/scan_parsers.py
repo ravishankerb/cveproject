@@ -8,13 +8,20 @@ def parse_snyk_report(file_path):
     findings = []
     vulns = data.get("vulnerabilities", [])
     for vuln in vulns:
+        # Extract CVE from identifiers.CVE array (first one if multiple)
+        cve = "UNKNOWN"
+        if "identifiers" in vuln and "CVE" in vuln["identifiers"]:
+            cve_list = vuln["identifiers"]["CVE"]
+            if cve_list and len(cve_list) > 0:
+                cve = cve_list[0]  # Take first CVE if multiple
+        
         findings.append({
-            "cve": vuln.get("id") or vuln.get("CVE", "UNKNOWN"),  # Snyk 'id' might be advisory ID (CVE if available)
+            "cve": cve,
             "pkg": vuln.get("packageName"),
             "installed": vuln.get("version"),
             "fixed": vuln.get("nearestFixedInVersion"),
             "severity": vuln.get("severity"),
-            "cvss": vuln.get("cvssScore") or vuln.get("cvssV3")
+            "cvss": vuln.get("CVSSv3")
         })
     return findings
 

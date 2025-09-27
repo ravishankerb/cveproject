@@ -1,5 +1,6 @@
 import json
-from openai import OpenAI
+import asyncio
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -31,13 +32,13 @@ Respond in JSON:
 }}
 """
 
-client = OpenAI()
+client = AsyncOpenAI()
 
-def analyze_with_llm(finding, project_context=""):
+async def analyze_with_llm(finding, project_context=""):
 
     prompt = make_llm_prompt(finding, project_context)
     # print(f"Making call with ", finding, project_context, prompt)
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model="gpt-4o-mini",  # or "gpt-4o" if you want stronger reasoning
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
